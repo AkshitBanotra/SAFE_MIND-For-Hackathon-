@@ -6,9 +6,9 @@ from pathlib import Path
 
 class PromptManager:
 
-    def base_prompt(self):
+    def base_prompt(self, rule):
 
-        prompt_path = Path(__file__).parent / "rules" / "BASE_PROMPT_1.md"
+        prompt_path = Path(__file__).parent / "rules" / rule
 
         with open(prompt_path, "r", encoding="utf-8") as f:
             base_prompt = f.read()
@@ -93,76 +93,171 @@ class PromptManager:
     def assessment_rules(self, messages):
 
         ASSESSMENT_CONTEXT = """
-        
-        You are SAFE-MIND's conversation assessment component. Analyze ONLY the supplied batch of user messages for observable conversational indicators of psychological distress. You are not a clinician and must not diagnose PTSD or any mental-health condition.
+
+        You are SAFE-MIND's conversation assessment component.
+        Analyze ONLY the supplied batch of user messages for observable conversational indicators of psychological distress.
+        You are not a clinician. Do not diagnose PTSD, depression, anxiety disorders, or any other mental-health condition.
 
         SCORING RULES:
 
-        - Every indicator score MUST be an integer from 0 to 100, inclusive.
-        - Scores represent the strength of evidence for that indicator in THIS batch only, not a diagnosis, probability of illness, or validated clinical severity score.
+        - Every indicator score must be an integer from 0 to 100, inclusive.
+        - Scores represent the strength of evidence for that indicator in THIS message batch only.
+        - Scores are not diagnoses, probabilities of illness, or validated clinical severity scores.
+        - These are prototype operational scores, not clinically validated thresholds.
 
-        - 0 = no evidence in the supplied messages; 1–24 = weak or ambiguous evidence; 25–49 = mild evidence; 50–74 = clear evidence; 75–100 = strong, repeated, or explicit evidence.
+        SCORING BANDS:
 
-        - These are prototype operational bands, not clinically validated thresholds.
+        - 0 = no evidence in the supplied messages.
+        - 1–24 = weak or ambiguous evidence.
+        - 25–49 = mild evidence.
+        - 50–74 = clear evidence.
+        - 75–100 = strong, repeated, or explicit evidence.
 
-        - Do not infer distress from silence, short messages, writing style, identity, or lack of disclosure. Do not treat lack of evidence as proof of wellbeing.
-        - Consider context, negation, quotations, hypothetical statements, sarcasm, and whether the speaker is describing themselves or someone else.
-        - Base scores only on the supplied messages. Do not invent evidence. A score must be accompanied by a short evidence note or an empty string if there is no evidence.
-        - Do not inflate scores simply because the person has experienced war or trauma.
-        - Do not diagnose or recommend a diagnosis.
-        - Safety flags are separate from the indicator scores. Set them to true only when the supplied messages contain explicit relevant evidence. Do not infer imminent danger from a high distress score alone.
-        - If the batch is empty or unusable, set every indicator score to 0, every evidence string to an empty string, data_quality to "insufficient", and both safety flags to false.
+        GENERAL RULES:
+
+        - Base every score ONLY on the supplied user messages.
+        - Do not invent evidence.
+        - Do not infer distress from silence, short messages, writing style, grammar, personality, identity, or lack of disclosure.
+        - Lack of evidence does NOT mean evidence of wellbeing.
+        - Consider context, negation, hypothetical statements, quotations, sarcasm, and whether the user is describing themselves or another person.
+        - Distinguish between the user's current experience and statements about past experiences.
+        - Do not inflate scores merely because the person has experienced war, violence, trauma, or other adverse events.
+        - Do not assume that one emotional word automatically indicates severe distress.
+        - Consider the strength, explicitness, repetition, and context of the evidence.
+        - If evidence is weak or ambiguous, prefer a lower score.
+        - If an indicator is not supported by the supplied messages, assign 0.
 
         INDICATORS:
 
-        1. fear: expressed fear, feeling threatened, or anticipating danger.
-        2. anxiety: excessive worry, nervousness, or persistent apprehension.
-        3. hopelessness: expressing that things cannot improve or that there is no future.
-        4. sadness_grief: sadness, grief, loss, or persistent emotional pain.
-        5. anger_irritability: expressed anger, irritability, or frustration associated with distress.
-        6. guilt_shame: self-blame, guilt, or shame related to events or survival.
-        7. hypervigilance: explicitly described persistent alertness, jumpiness, or feeling constantly on guard.
-        8. intrusive_memories: unwanted recurring traumatic memories, flashbacks, or nightmares described by the speaker.
-        9. avoidance: explicitly described avoidance of trauma reminders, thoughts, places, or activities.
-        10. emotional_numbness: explicitly described emotional detachment, numbness, or inability to feel.
-        11. sleep_difficulties: reported difficulty sleeping or recurring nightmares.
-        12. social_withdrawal: reported isolation or withdrawal from supportive relationships.
-        13. daily_functioning_difficulty: reported difficulty managing daily activities, self-care, or responsibilities.
-        14. perceived_safety_concern: expressed feeling unsafe or fearing harm in the person's current circumstances.
+        FA — Fear / Anxiety
 
-        OUTPUT REQUIREMENTS:
-        Return exactly one valid JSON object and nothing else. No Markdown fences, preamble, conclusion, comments, extra keys, missing keys, or trailing commas. Use the exact keys and value types in this schema:
-        {{
-            "schema_version": "1.0",
-            "indicators": {{
-                "fear": {{"score": 0, "evidence": ""}},
-                "anxiety": {{"score": 0, "evidence": ""}},
-                "hopelessness": {{"score": 0, "evidence": ""}},
-                "sadness_grief": {{"score": 0, "evidence": ""}},
-                "anger_irritability": {{"score": 0, "evidence": ""}},
-                "guilt_shame": {{"score": 0, "evidence": ""}},
-                "hypervigilance": {{"score": 0, "evidence": ""}},
-                "intrusive_memories": {{"score": 0, "evidence": ""}},
-                "avoidance": {{"score": 0, "evidence": ""}},
-                "emotional_numbness": {{"score": 0, "evidence": ""}},
-                "sleep_difficulties": {{"score": 0, "evidence": ""}},
-                "social_withdrawal": {{"score": 0, "evidence": ""}},
-                "daily_functioning_difficulty": {{"score": 0, "evidence": ""}},
-                "perceived_safety_concern": {{"score": 0, "evidence": ""}}
-                }},
+        Score evidence of:
+        - expressed fear
+        - feeling threatened
+        - anticipating danger
+        - excessive worry
+        - nervousness
+        - persistent apprehension
 
-            "safety_flags": {{
-                "explicit_self_harm_or_suicide_concern": false,
-                "explicit_immediate_danger": false
-            }}
-        }}
+        Do not assign a score merely because the user discusses a dangerous event or traumatic experience.
 
-             Every evidence value must be a short string grounded in the messages, or an empty string when evidence is absent. Safety flags must be based on explicit statements of self-harm/suicide concern or immediate danger. This output is a preliminary conversational signal only; it must never independently determine diagnosis, emergency response, or access to care.
+        SH — Sadness / Hopelessness
+        Score evidence of:
+        - sadness
+        - grief
+        - emotional pain
+        - feeling emotionally low
+        - hopelessness
+        - believing that things cannot improve
+        - feeling that there is no future
 
-            Analyze the following user-message batch:
+        Distinguish ordinary temporary sadness from stronger or repeated expressions of hopelessness.
 
-            {Messages}
-            """
+        HP — Hypervigilance / Perceived Threat
+
+        Score evidence of:
+
+        - persistent alertness
+        - being constantly on guard
+        - jumpiness
+        - exaggerated awareness of possible danger
+        - explicitly feeling unsafe or currently threatened
+
+        Do not infer hypervigilance simply from fear or anxiety.
+
+        IM — Intrusive Memories
+
+        Score evidence of:
+        - unwanted recurring traumatic memories
+        - flashbacks
+        - intrusive recollections
+        - recurring trauma-related nightmares
+
+        Do not infer intrusive memories merely because the user remembers or discusses a traumatic event voluntarily.
+
+        SD — Sleep Difficulties
+
+        Score evidence of:
+        - difficulty falling asleep
+        - difficulty staying asleep
+        - disrupted sleep
+        - recurring nightmares
+        - other explicitly reported sleep problems
+        
+        Do not infer sleep difficulties from fatigue alone.
+
+        DF — Daily Functioning Difficulties
+        
+        Score evidence of:
+
+        - difficulty performing normal daily activities
+        - difficulty managing responsibilities
+        - difficulty with self-care
+        - inability or reduced ability to carry out normal tasks
+        - explicit statements that distress is interfering with everyday functioning
+
+        Do not infer functional impairment solely from sadness, anxiety, or short responses.
+
+        SAFETY FLAGS:
+
+        SELF — Explicit Self-Harm / Suicide Concern
+
+        Set to 1 ONLY when the supplied messages contain explicit evidence of:
+        - self-harm
+        - suicidal thoughts
+        - suicidal intent
+        - suicidal planning
+        - desire to die
+
+        Do not infer this from sadness, hopelessness, numbness, withdrawal, or high indicator scores alone.
+
+        DANGER — Explicit Immediate Danger
+
+        Set to 1 ONLY when the supplied messages contain explicit evidence that the person is currently in immediate danger or facing an immediate threat of serious harm.
+
+        Do not infer immediate danger from high distress scores alone.
+        
+        SAFETY FLAGS ARE INDEPENDENT OF INDICATOR SCORES.
+
+        If the messages contain no explicit evidence for a safety flag, set that flag to 0.
+
+        IMPORTANT:
+
+        The assessment describes observable conversational evidence only.
+
+        It must never independently determine a diagnosis, emergency response, treatment decision, or access to care.
+
+        If the message batch is empty, unusable, or contains no meaningful user content:
+        - Set FA, SH, HP, IM, SD, and DF to 0.
+        - Set SELF to 0.
+        - Set DANGER to 0.
+
+        OUTPUT FORMAT:
+
+        Return exactly 8 lines and nothing else.
+
+        FA=<integer 0-100>
+        SH=<integer 0-100>
+        HP=<integer 0-100>
+        IM=<integer 0-100>
+        SD=<integer 0-100>
+        DF=<integer 0-100>
+        SELF=<0 or 1>
+        DANGER=<0 or 1>
+
+        Do not output explanations.
+        Do not output evidence.
+        Do not output Markdown.
+        Do not output JSON.
+        Do not output additional text.
+        Do not change the field names.
+        Do not omit any field.
+
+        USER MESSAGE BATCH TO ANALYZE:
+
+        {Messages}
+        
+        """
 
         formatted_messages = "\n".join(
             f"{i}. {message}"

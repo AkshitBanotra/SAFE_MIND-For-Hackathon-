@@ -44,7 +44,7 @@ class ConversationManager:
             if msg.get("role") == "user":
                 user_messages.append(msg["content"])
 
-        msg_limit = 10
+        msg_limit = 5
 
         self.tracked = len(user_messages)
         print("User_messages:", self.tracked)
@@ -102,8 +102,8 @@ class ConversationManager:
         FROM victim_conv
         WHERE victim_id=?
         ORDER BY id
-        LIMIT 10 OFFSET ?
-        """, (victim_id, self.queue_tracked - 10))
+        LIMIT 5 OFFSET ?
+        """, (victim_id, self.queue_tracked - 5))
 
         result = []
         for row in cursor.fetchall():

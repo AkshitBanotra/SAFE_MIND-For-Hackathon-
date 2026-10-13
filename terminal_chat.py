@@ -6,7 +6,7 @@ from pathlib import Path
 import threading
 import json
 import requests
-from llm.ollama_api import ollama_warmup, streaming_response, nyx_response, messages
+from llm.ollama_api import ollama_warmup, streaming_response, companion_response, messages, behaviour_adaptor
 from voice.tts import tts_warmup, tts_worker
 from pathlib import Path
 import re
@@ -19,7 +19,7 @@ import subprocess
 from datetime import datetime
 import json
 import conversation.conv_manager
-#from filelock import FileLock
+import re
 
 ###########################
 
@@ -55,92 +55,50 @@ def auto_trigger(message, trigger):
     payload = {"model": "batiai/gemma4-e2b:q4", "messages": runtime_message, "think": False, "stream": True}
     response = requests.post(shared.url, json=payload)
     print(response)
-    assistant_message = streaming_response(response, shared.q1, None)
+    for _ in streaming_response(response, shared.q1, None):
+        pass
     tts_worker(shared.q1)
+
+##########################################
+
+def parse_assessment(raw: str) -> dict[str, int]:
+
+    EXPECTED_KEYS = {
+        "FA", "SH", "HP", "IM",
+        "SD", "DF", "SELF", "DANGER"
+    }
+
+    pattern = r"(?m)^\s*([A-Z]+)\s*=\s*(\d+)\s*$"
+
+    pairs = re.findall(pattern, raw)
+    result = {}
+
+    for key, value in pairs:
+        if key not in EXPECTED_KEYS:
+            continue
+
+        if key in result:
+            raise ValueError(f"Duplicate assessment key: {key}")
+
+        result[key] = int(value)
+
+    missing = EXPECTED_KEYS - result.keys()
+
+    if missing:
+        raise ValueError(f"Missing assessment keys: {sorted(missing)}")
+
+    return result
 
 ##########################################
 
 def assessment_worker():
 
-    assessment_schema = {
-        "type": "object",
-        "properties": {
-            "schema_version": {
-                "type": "string",
-                "enum": ["1.0"]
-            },
-        "indicators": {
-            "type": "object",
-            "properties": {
-                "fear": {"$ref": "#/$defs/indicator"},
-                "anxiety": {"$ref": "#/$defs/indicator"},
-                "hopelessness": {"$ref": "#/$defs/indicator"},
-                "sadness_grief": {"$ref": "#/$defs/indicator"},
-                "anger_irritability": {"$ref": "#/$defs/indicator"},
-                "guilt_shame": {"$ref": "#/$defs/indicator"},
-                "hypervigilance": {"$ref": "#/$defs/indicator"},
-                "intrusive_memories": {"$ref": "#/$defs/indicator"},
-                "avoidance": {"$ref": "#/$defs/indicator"},
-                "emotional_numbness": {"$ref": "#/$defs/indicator"},
-                "sleep_difficulties": {"$ref": "#/$defs/indicator"},
-                "social_withdrawal": {"$ref": "#/$defs/indicator"},
-                "daily_functioning_difficulty": {
-                    "$ref": "#/$defs/indicator"
-                },
-                "perceived_safety_concern": {
-                    "$ref": "#/$defs/indicator"
-                }
-            },
-            "required": [
-                "fear", "anxiety", "hopelessness", "sadness_grief",
-                "anger_irritability", "guilt_shame", "hypervigilance",
-                "intrusive_memories", "avoidance", "emotional_numbness",
-                "sleep_difficulties", "social_withdrawal",
-                "daily_functioning_difficulty", "perceived_safety_concern"
-            ],
-            "additionalProperties": False
-        },
-        "safety_flags": {
-            "type": "object",
-            "properties": {
-                "explicit_self_harm_or_suicide_concern": {
-                    "type": "boolean"
-                },
-                "explicit_immediate_danger": {
-                    "type": "boolean"
-                }
-            },
-            "required": [
-                "explicit_self_harm_or_suicide_concern",
-                "explicit_immediate_danger"
-            ],
-            "additionalProperties": False
-        }
-    },
-    "required": ["schema_version", "indicators", "safety_flags"],
-    "additionalProperties": False,
-    "$defs": {
-    "indicator": {
-        "type": "object",
-        "properties": {
-            "score": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 100
-                    },
-                    "evidence": {
-                        "type": "string"
-                    }
-                },
-                "required": ["score", "evidence"],
-                "additionalProperties": False
-            }
-        }
-    }
+    with open(json_path, "r") as f:
+        data = json.load(f)
 
     last_accessed = 0
     while True:
-        if conv.queue_tracked >= last_accessed + 10:
+        if conv.queue_tracked >= last_accessed + 5:
             trigger = """
             Assess the supplied batch of user messages using the defined indicators
             and scoring rules. Return only the JSON object specified in the schema.
@@ -157,14 +115,18 @@ def assessment_worker():
                 }
             ]
             
-            payload = {"model": "batiai/gemma4-e2b:q4", "messages": runtime_message, "think": False, "stream": False, "format": assessment_schema}
+            payload = {"model": "batiai/gemma4-e2b:q4", "messages": runtime_message, "think": False, "stream": False }
 
             response = requests.post(shared.url, json=payload)
             print(response)
             assessment = response.json()["message"]["content"]
-            assessment = json.loads(assessment)
+            shared.q3.put(parse_assessment(assessment))
+            data["llm_analysed"] = True
+            with open(json_path, "w") as f:
+                json.dump(data, f, indent=4)
             print(assessment)
-            last_accessed += 10
+            print("RAW ASSESSMENT:", repr(assessment))
+            last_accessed += 5
 
         time.sleep(0.2)
 
@@ -283,26 +245,34 @@ assessment_thread = threading.Thread(
     target=assessment_worker,
     daemon=True
 )
+
 assessment_thread.start()
 
 clear_screen()
 
+########################################
+
+def run_companion_response(user_input):
+
+    for _ in companion_response(user_input, shared.q1, shared.q2):
+        pass
+
+#######################################
 while True:
     #speech = voice.stt.speech_queue.get()
     #user_input = f"you:{speech}"
     user_input = input("you: ")
     #print(user_input)
-    t1 = threading.Thread(target=nyx_response, args=(user_input, shared.q1, shared.q2))
+    t1 = threading.Thread(target=run_companion_response, args=(user_input,))
     t2 = threading.Thread(target=tts_worker, args=(shared.q1,))
-    #t3 = threading.Thread(target=core.dispatcher.intent_route, args=(shared.q2,))
+    behaviour_adaptor_thread = threading.Thread(target=behaviour_adaptor,)
 
     t1.start()
     t2.start()
-    #t3.start()
+    behaviour_adaptor_thread.start()
 
     t1.join()
     t2.join()
-    #t3.join()
 
     conv.add()
 
