@@ -8,6 +8,11 @@ q1 = queue.Queue()
 q2 = queue.Queue()
 q3 = queue.Queue()
 
+tts_queue = queue.Queue()
+
+speech_queue = queue.Queue()
+user_transcript = queue.Queue()
+
 #######################
 
 model = "batiai/gemma4-e2b:q4"

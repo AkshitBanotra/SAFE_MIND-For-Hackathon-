@@ -66,12 +66,19 @@ export async function startVoiceAudio(
   processor.connect(mute)
   mute.connect(context.destination)
 
-  return async () => {
-    processor.port.onmessage = null
-    processor.disconnect()
-    mute.disconnect()
-    source.disconnect()
-    stream.getTracks().forEach((track) => track.stop())
-    if (context.state !== 'closed') await context.close()
+  // Several shutdown paths can run at once (toggle, socket close, unmount).
+  // Keep cleanup idempotent so they cannot race to close the same context.
+  let cleanup: Promise<void> | null = null
+  return () => {
+    if (cleanup) return cleanup
+    cleanup = (async () => {
+      processor.port.onmessage = null
+      processor.disconnect()
+      mute.disconnect()
+      source.disconnect()
+      stream.getTracks().forEach((track) => track.stop())
+      if (context.state !== 'closed') await context.close()
+    })()
+    return cleanup
   }
 }

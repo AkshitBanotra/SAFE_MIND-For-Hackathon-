@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-import sounddevice as sd
+import soundfile as sf
+import numpy as np
 import threading
 from kokoro import KPipeline
-import shared
+from io import BytesIO
 
 ##########################
 
@@ -41,15 +42,25 @@ def tts_worker(q1):
         # gs is for graphemes string (the text chunk being spoken)
         # ps for phoneme representation (pronunciation information)
         # audio -> actual waveform data as numpy array (like audio consists of sampled waveform amplitudes represented as an array)
+        audio_chunks = []
         for _, _, audio in generator:
 
             #if not speech_queue.empty():
                 #break
 
             if audio is not None:
-                #print(f"Playing: {gs}")
-                #print(str(len(audio)/24000) + "s" + " and " + str(len(audio))
-                shared.tts_playing = True
-                sd.play(audio, 24000)
-                sd.wait()
-                shared.tts_playing = False
+                audio_chunks.append(audio)
+
+        combined_audio = np.concatenate(audio_chunks)
+        #print(f"Playing: {gs}")
+        #print(str(len(audio)/24000) + "s" + " and " + str(len(audio))
+        filelink_buffer = BytesIO()
+        sf.write(filelink_buffer, combined_audio, 24000, format="wav", subtype="PCM_16")
+
+        tts_audio = filelink_buffer.getvalue()
+
+        yield tts_audio
+
+        #sd.play(audio, 24000)
+        #sd.wait()
+             #shared.tts_playing = False

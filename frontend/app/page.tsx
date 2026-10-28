@@ -17,22 +17,93 @@ export default function Home() {
   const [chatError, setChatError] = useState('')
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [voiceAssistant, setVoiceAssistant] = useState(false)
+  const [voiceSpeaking, setVoiceSpeaking] = useState(false)
   const [speakingId, setSpeakingId] = useState<number | null>(null)
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const voiceStreamRef = useRef<MediaStream | null>(null)
   const voiceSocketRef = useRef<WebSocket | null>(null)
+  const voiceAudioContextRef = useRef<AudioContext | null>(null)
+  const voiceAudioCursorRef = useRef(0)
+  const voiceReplyIdRef = useRef<number | null>(null)
   const stopVoiceAudioRef = useRef<(() => Promise<void>) | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const nextId = useRef(1)
+  const greetingStartedRef = useRef(false)
 
   useEffect(() => {
     const container = scrollRef.current
     if (container) container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
   }, [messages, isSending])
+
+  useEffect(() => {
+    if (greetingStartedRef.current) return
+    greetingStartedRef.current = true
+    const assistantId = nextId.current++
+    setMessages([{ id: assistantId, role: 'assistant', content: '', streaming: true }])
+    setIsSending(true)
+
+    void (async () => {
+      let greeting = ''
+      try {
+        const response = await fetch(`${API_URL.replace(/\/$/, '')}/greeting`, {
+          headers: { Accept: 'text/event-stream' },
+        })
+        if (!response.ok) throw new Error(`Greeting service returned ${response.status}.`)
+        if (!response.body) throw new Error('The greeting service returned no response stream.')
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let doneEvent = false
+        const consumeEvent = (event: string) => {
+          const data = event.split(/\r?\n/)
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).replace(/^ /, ''))
+            .join('\n')
+          if (!data) return
+          if (data.trim() === '[DONE]') { doneEvent = true; return }
+          try {
+            const parsed: unknown = JSON.parse(data)
+            if (typeof parsed === 'object' && parsed !== null && 'delta' in parsed && typeof parsed.delta === 'string') {
+              greeting += parsed.delta
+              updateMessage(assistantId, greeting, true)
+            }
+          } catch {
+            greeting += data
+            updateMessage(assistantId, greeting, true)
+          }
+        }
+        while (!doneEvent) {
+          const { value, done } = await reader.read()
+          buffer += decoder.decode(value, { stream: !done })
+          const events = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n\n')
+          buffer = events.pop() ?? ''
+          for (const event of events) {
+            consumeEvent(event)
+            if (doneEvent) break
+          }
+          if (done) {
+            if (buffer.trim()) consumeEvent(buffer)
+            break
+          }
+        }
+        if (!greeting.trim()) throw new Error('The greeting service returned an empty response.')
+        updateMessage(assistantId, greeting, false)
+        // Browsers may block audio before the first user gesture. In that case
+        // the regular listen button on the greeting remains available.
+        void speakMessage({ id: assistantId, role: 'assistant', content: greeting })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to load the opening message.'
+        updateMessage(assistantId, 'Hi, I’m here with you. What’s on your mind?', false)
+        setChatError(message)
+      } finally {
+        setIsSending(false)
+      }
+    })()
+  }, [])
 
   const stopMicrophone = useCallback(() => {
     const recorder = mediaRecorderRef.current
@@ -50,6 +121,7 @@ export default function Home() {
     void stopVoiceAudioRef.current?.()
     voiceStreamRef.current?.getTracks().forEach((track) => track.stop())
     voiceSocketRef.current?.close()
+    void voiceAudioContextRef.current?.close()
   }, [])
 
   function updateMessage(id: number, content: string, streaming?: boolean) {
@@ -193,6 +265,10 @@ export default function Home() {
       voiceStreamRef.current = null
       voiceSocketRef.current?.close()
       voiceSocketRef.current = null
+      void voiceAudioContextRef.current?.close()
+      voiceAudioContextRef.current = null
+      voiceReplyIdRef.current = null
+      setVoiceSpeaking(false)
       setVoiceAssistant(false)
       return
     }
@@ -204,11 +280,44 @@ export default function Home() {
     let stream: MediaStream | null = null
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } })
+      voiceAudioContextRef.current = new AudioContext({ sampleRate: 24000 })
+      await voiceAudioContextRef.current.resume()
+      voiceAudioCursorRef.current = voiceAudioContextRef.current.currentTime
       const configuredUrl = process.env.NEXT_PUBLIC_VOICE_WS_URL
       const socketUrl = configuredUrl ?? `${API_URL.replace(/^http/, 'ws').replace(/\/$/, '')}/voice`
       const socket = new WebSocket(socketUrl)
       socket.binaryType = 'arraybuffer'
       voiceSocketRef.current = socket
+      socket.onmessage = (event: MessageEvent) => {
+        if (typeof event.data === 'string') {
+          try {
+            const message = JSON.parse(event.data) as { type?: string; delta?: string; text?: string }
+            if (message.type === 'user_transcript' && message.text?.trim()) {
+              const id = nextId.current++
+              setMessages((current) => [...current, { id, role: 'user', content: message.text!.trim() }])
+            } else if (message.type === 'text_delta' && typeof message.delta === 'string') {
+              let id = voiceReplyIdRef.current
+              if (id === null) {
+                id = nextId.current++
+                voiceReplyIdRef.current = id
+                setMessages((current) => [...current, { id: id!, role: 'assistant', content: '', streaming: true }])
+              }
+              setMessages((current) => current.map((item) => item.id === id
+                ? { ...item, content: item.content + message.delta, streaming: true }
+                : item))
+            } else if (message.type === 'text_done') {
+              const id = voiceReplyIdRef.current
+              if (id !== null) setMessages((current) => current.map((item) => item.id === id ? { ...item, streaming: false } : item))
+              voiceReplyIdRef.current = null
+            }
+          } catch {
+            // Ignore non-JSON text messages; the live protocol uses JSON events.
+          }
+          return
+        }
+        setVoiceSpeaking(true)
+        void playVoiceAudio(event.data)
+      }
       await new Promise<void>((resolve, reject) => {
         socket.onopen = () => resolve()
         socket.onerror = () => reject(new Error('WebSocket connection failed.'))
@@ -230,6 +339,8 @@ export default function Home() {
       setVoiceAssistant(true)
     } catch {
       stream?.getTracks().forEach((track) => track.stop())
+      void voiceAudioContextRef.current?.close()
+      voiceAudioContextRef.current = null
       voiceStreamRef.current = null
       voiceSocketRef.current?.close()
       voiceSocketRef.current = null
@@ -238,23 +349,46 @@ export default function Home() {
     }
   }
 
+  async function playVoiceAudio(data: ArrayBuffer | Blob) {
+    const context = voiceAudioContextRef.current
+    if (!context) return
+    const bytes = data instanceof Blob ? await data.arrayBuffer() : data
+    if (bytes.byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) return
+    const samples = new Float32Array(bytes)
+    if (!samples.length) return
+    const buffer = context.createBuffer(1, samples.length, 24000)
+    buffer.copyToChannel(samples, 0)
+    const source = context.createBufferSource()
+    source.buffer = buffer
+    source.connect(context.destination)
+    const startAt = Math.max(context.currentTime, voiceAudioCursorRef.current)
+    source.start(startAt)
+    voiceAudioCursorRef.current = startAt + buffer.duration
+    source.onended = () => {
+      if (context.currentTime >= voiceAudioCursorRef.current - 0.04) setVoiceSpeaking(false)
+    }
+  }
+
   async function speakMessage(message: Message) {
     if (speakingId === message.id) { setSpeakingId(null); return }
     setSpeakingId(message.id)
+    let url: string | null = null
     try {
       const response = await fetch(`${API_URL.replace(/\/$/, '')}/tts`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: message.content }),
       })
       if (!response.ok) throw new Error()
-      const url = URL.createObjectURL(await response.blob())
-      const audio = new Audio(url)
-      audio.onended = () => { URL.revokeObjectURL(url); setSpeakingId(null) }
-      audio.onerror = () => { URL.revokeObjectURL(url); setSpeakingId(null); setChatError('Could not play generated speech.') }
+      const audioUrl = URL.createObjectURL(await response.blob())
+      url = audioUrl
+      const audio = new Audio(audioUrl)
+      audio.onended = () => { URL.revokeObjectURL(audioUrl); setSpeakingId(null) }
+      audio.onerror = () => { URL.revokeObjectURL(audioUrl); setSpeakingId(null); setChatError('Could not play generated speech.') }
       await audio.play()
     } catch {
+      if (url) URL.revokeObjectURL(url)
       setSpeakingId(null)
-      setChatError('Could not generate speech. Check the TTS service and try again.')
+      setChatError('Could not play generated speech. You can try the listen button again.')
     }
   }
 
@@ -281,10 +415,11 @@ export default function Home() {
         </aside>
         <section className="chat-panel">
           <div className="chat-scroll" ref={scrollRef}>
+            {voiceAssistant && <div className={`live-voice-status ${voiceSpeaking ? 'speaking' : ''}`} role="status"><span className="wave" aria-hidden="true"><i /><i /><i /><i /><i /></span><span>{voiceSpeaking ? 'Safe Mind is speaking' : 'Listening to you'}</span></div>}
             {messages.length === 0 && <div className="chat-intro"><div className="intro-orb"><BrainIcon /></div><span className="eyebrow">A MOMENT FOR YOU</span><h1>What&apos;s on your mind?</h1><p>Take your time. Start wherever feels right.</p></div>}
             <div className="message-stack">
               {messages.map((message) => <div key={message.id} className={`message-row ${message.role}`}>
-                {message.role === 'assistant' && <div className="avatar assistant-avatar"><PulseIcon /></div>}
+                {message.role === 'assistant' && <div className="avatar assistant-avatar"><BrainIcon /></div>}
                 <div className="message-content"><div className={`bubble ${message.role}`}>{message.content || (message.streaming ? <span className="typing-dots"><i /><i /><i /></span> : null)}</div>{message.role === 'assistant' && message.content && !message.streaming && <button className={`speak-button ${speakingId === message.id ? 'speaking' : ''}`} onClick={() => void speakMessage(message)} title="Listen to this response" aria-label="Listen to this response"><SpeakerIcon /></button>}</div>
               </div>)}
             </div>
@@ -308,8 +443,7 @@ export default function Home() {
   )
 }
 
-function PulseIcon() { return <svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M5 17h5l2.4-7 4.2 14 2.6-9H27" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" /></svg> }
-function BrainIcon() { return <svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M15.8 7.2a4 4 0 0 0-7.4 2 4.3 4.3 0 0 0-2.2 7.4 4 4 0 0 0 2.3 6.8 3.9 3.9 0 0 0 7.3 1.8V7.2Zm.4 0a4 4 0 0 1 7.4 2 4.3 4.3 0 0 1 2.2 7.4 4 4 0 0 1-2.3 6.8 3.9 3.9 0 0 1-7.3 1.8V7.2Z" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/><path d="M10 12c2 0 3 1.2 3 3m-3 4c2 0 3-1 3-3m9-4c-2 0-3 1.2-3 3m3 4c-2 0-3-1-3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg> }
+function BrainIcon() { return <svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M15.8 7a4 4 0 0 0-7.5 2 4.2 4.2 0 0 0-2.1 7 4.1 4.1 0 0 0 2.2 7 4 4 0 0 0 7.4 1.6V7Zm.4 0a4 4 0 0 1 7.5 2 4.2 4.2 0 0 1 2.1 7 4.1 4.1 0 0 1-2.2 7 4 4 0 0 1-7.4 1.6V7Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/><path d="M11 12.5c1.7 0 2.7 1.1 2.7 2.8M11 20c1.7 0 2.7-1.1 2.7-2.8m7.3-4.7c-1.7 0-2.7 1.1-2.7 2.8m2.7 4.7c-1.7 0-2.7-1.1-2.7-2.8" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round"/></svg> }
 function SpeakerIcon() { return <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 10v4h4l5 4V6l-5 4H4Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round"/><path d="M16 9a4 4 0 0 1 0 6m2.5-8.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"/></svg> }
 function MoonIcon() { return <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.3 15.4A8.5 8.5 0 0 1 8.6 3.7 8.6 8.6 0 1 0 20.3 15.4Z" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/></svg> }
 function SunIcon() { return <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.7"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"/></svg> }

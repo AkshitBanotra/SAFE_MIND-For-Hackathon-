@@ -44,7 +44,7 @@ buffer = []
 is_speaking = False
 silence = 0
 
-def callback(indata, frames, time, status):
+def callback(raw_audio):
 
     global buffer
     global silence
@@ -59,10 +59,7 @@ def callback(indata, frames, time, status):
     if shared.llm_busy:
         return
 
-    if status:
-        print(status)
-
-    audio_chunk = indata.flatten()
+    audio_chunk = raw_audio.flatten()
 
     audio_chunk = torch.from_numpy(audio_chunk).float()
 
@@ -76,11 +73,11 @@ def callback(indata, frames, time, status):
             is_speaking = True
         
         silence = 0
-        chunk = indata.flatten().copy()
+        chunk = raw_audio.flatten().copy()
         buffer.append(chunk)
     else:
         if is_speaking:
-            buffer.append(indata.flatten().copy())
+            buffer.append(raw_audio.flatten().copy())
 
             if len(buffer) > 0:
                 silence += 1
@@ -101,6 +98,7 @@ def stt_worker():
 
     while True:
         audio = stt_queue.get()
+
         segments, info = model.transcribe(
             audio,
             language="en",
@@ -111,11 +109,11 @@ def stt_worker():
 
         text = ""
         for segment in segments:
-            text += segment.text
+            text += segment.text.strip()
 
-        text = text.strip()
-        if len(text) > 0:
-            speech_queue.put(text)
+        if text:
+            shared.speech_queue.put(text)
+            shared.user_transcript.put(text)
 
 def stt_start():
 
@@ -125,20 +123,3 @@ def stt_start():
     )
 
     worker.start()
-    while True:
-        if shared.llm_listen:
-            with sd.InputStream(
-                samplerate=samplerate,
-                channels=1,
-                dtype="float32",
-                blocksize=CHUNK,
-                callback=callback,
-            ):
-                print("INPUT STREAM OPENED!")
-                while shared.llm_listen:
-                    sd.sleep(100)
-
-        else:
-            sd.sleep(100)
-            #sd.stop()
-            #sd.close()
