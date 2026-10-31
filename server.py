@@ -148,6 +148,44 @@ def assessment_worker():
 
 ###########################################
 
+def daily_summary_worker(total_assessments):
+
+    if total_assessments is not None:
+        
+        trigger = """
+        Analyze the collected runtime assessments and generate a concise yet moderately detailed natural-language summary of the user's observed emotional and psychological state throughout the day, highlighting prominent patterns, recurring indicators, and any relevant changes or safety concerns."""
+
+        runtime_message = [
+            {
+                "role": "system",
+                "content": prompt.summary_worker_context(total_assessments)
+            },
+            {
+                "role": "user",
+                "content": trigger
+            }
+        ]
+
+        payload = {"model": "batiai/gemma4-e2b:q4", "messages": runtime_message, "think": False, "stream": False}
+
+        response = requests.post(shared.url, json=payload)
+        #print(response)
+
+        #print("Status:", response.status_code)
+        #print("Response:", response.text)
+
+        #data = response.json()
+
+        #print("Parsed data:", data)
+        
+        summary_report = response.json()["message"]["content"]
+
+        #print(summary_report)
+
+        return summary_report
+
+###########################################
+
 def assessment_generator():
 
     conv.start_db_worker()
@@ -433,4 +471,32 @@ def distress_index():
     return {
             "date": current_date,
             "distress_score": distress_index
+    }
+
+@app.get("/therapist/summary")
+def get_therapist_summary():
+
+    now = datetime.now()
+    current_date = now.strftime("%d %B %Y")
+    
+    distress_assessment = distress.distress_db("fetch_2")
+
+    count = 0
+    assessments = []
+    for row in distress_assessment:
+        if row[0] is not None:
+            assessments.append(row[0])
+            count += 1
+
+    if count > 0:
+        summary = daily_summary_worker(assessments)
+    else:
+        summary = None
+
+    if summary is None:
+        raise HTTPException(status_code=404, detail="No summary is generated for today.")
+
+    return {
+            "date": current_date,
+            "assessment_report": summary
     }

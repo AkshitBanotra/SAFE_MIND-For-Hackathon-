@@ -6,9 +6,20 @@ import './therapist.css'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 type Point = { date: string; value: number | null }
-type Summary = { title?: string; content?: string; text?: string; generated_at?: string }
+type Summary = { date?: string; assessment_report?: string }
 type AlertItem = { id: string | number; message: string; text?: string; title?: string; created_at?: string; severity?: string; read?: boolean }
 const formatDateLocal = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+const normalizeDate = (value: string, fallback: string) => {
+  const isoDate = value.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (isoDate) return isoDate[1]
+  const humanDate = value.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/)
+  if (humanDate) {
+    const month = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'].indexOf(humanDate[2].toLowerCase())
+    if (month >= 0) return `${humanDate[3]}-${String(month + 1).padStart(2, '0')}-${humanDate[1].padStart(2, '0')}`
+  }
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? fallback : formatDateLocal(parsed)
+}
 
 export default function TherapistDashboard() {
   const [dark, setDark] = useState(false)
@@ -30,6 +41,7 @@ export default function TherapistDashboard() {
   const alertMenuRef = useRef<HTMLDivElement>(null)
   const pointsRef = useRef<Point[]>([])
   const demoPointsRef = useRef<Point[]>([])
+  const summaryFetchedDateRef = useRef<string | null>(null)
 
   const loadReport = useCallback(async () => {
     setLoading(true)
@@ -45,7 +57,7 @@ export default function TherapistDashboard() {
           const parsed: unknown = JSON.parse(responseText)
           if (typeof parsed === 'object' && parsed !== null) {
             const scoreData = parsed as { date?: string; value?: number | null; score?: number | null; distress_index?: number | null; distress_score?: number | null }
-            scoreDate = (scoreData.date ?? scoreDate).slice(0, 10)
+            if (scoreData.date) scoreDate = normalizeDate(scoreData.date, scoreDate)
             const rawValue = scoreData.value ?? scoreData.score ?? scoreData.distress_index ?? scoreData.distress_score
             if (rawValue !== undefined && rawValue !== null && Number.isFinite(Number(rawValue))) {
               newPoint = { date: scoreDate, value: Math.max(0, Math.min(100, Number(rawValue))) }
@@ -78,13 +90,23 @@ export default function TherapistDashboard() {
         catch { /* The current session can still display the scores without storage. */ }
       }
 
-      const summaryResponse = await fetch(`${root}/therapist/summary?date=${encodeURIComponent(scoreDate)}`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
-      if (summaryResponse.ok) {
-        const summaryText = await summaryResponse.text()
-        setSummary(summaryText.trim() ? JSON.parse(summaryText) as Summary : null)
+      const summaryRequestDate = formatDateLocal(new Date())
+      if (summaryFetchedDateRef.current !== summaryRequestDate) {
+        summaryFetchedDateRef.current = summaryRequestDate
+        try {
+          const summaryResponse = await fetch(`${root}/therapist/summary`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
+          if (summaryResponse.ok) {
+            const summaryText = await summaryResponse.text()
+            setSummary(summaryText.trim() ? JSON.parse(summaryText) as Summary : null)
+          }
+          else if (summaryResponse.status === 404 || summaryResponse.status === 204) setSummary(null)
+          else throw new Error(`Daily summary request returned ${summaryResponse.status}.`)
+        }
+        catch (error) {
+          summaryFetchedDateRef.current = null
+          throw error
+        }
       }
-      else if (summaryResponse.status === 404) setSummary(null)
-      else if (summaryResponse.status !== 204) throw new Error(`Daily summary request returned ${summaryResponse.status}.`)
       setLastUpdated(new Date())
     } catch { /* Leave the dashboard in its quiet empty or last-known-data state. */ }
     finally { setLoading(false) }
@@ -241,7 +263,7 @@ export default function TherapistDashboard() {
       </section>
       <section className="lower-grid">
         <article className="panel summary-panel"><div className="panel-heading"><div><div className="heading-icon sparkle">✳</div><div><h2>AI daily summary</h2><p>End of day reflection</p></div></div><span className="generated-tag">{summary ? 'LATEST REPORT' : 'AWAITING REPORT'}</span></div>
-          {summary ? <div className="summary-copy"><h3>{summary.title ?? 'Daily wellbeing summary'}</h3><p>{summary.content ?? summary.text ?? 'No summary text was provided.'}</p>{summary.generated_at && <small>Generated {new Date(summary.generated_at).toLocaleString()}</small>}</div> : <div className="summary-empty"><span className="summary-icon"><Clock3 size={18}/></span><div><b>Today&apos;s report will appear here</b><p>The report is requested after the day closes. No data is shown until the service returns a reading.</p></div></div>}
+          {summary ? <div className="summary-copy"><h3>Daily wellbeing summary</h3><p>{summary.assessment_report ?? 'No assessment report was provided.'}</p>{summary.date && <small>Report date: {summary.date}</small>}</div> : <div className="summary-empty"><span className="summary-icon"><Clock3 size={18}/></span><div><b>Today&apos;s report will appear here</b><p>The report is requested after the day closes. No data is shown until the service returns a reading.</p></div></div>}
           <div className="schedule-note"><span className="schedule-pip"/><span>Daily check at midnight · checks again when this dashboard opens</span></div>
         </article>
       </section>
