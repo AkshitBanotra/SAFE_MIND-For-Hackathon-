@@ -3,6 +3,7 @@
 import requests
 import json
 import re
+import shared
 from shared import llm_busy, SIGNALS, url
 from core.PromptManager import PromptManager
 from core.distress_engine import DistressEngine
@@ -50,20 +51,24 @@ def behaviour_adaptor():
     
     while data["llm_analysed"]:
 
-        distress.runtime_distress_score()
+        distress.runtime_distress_score(shared.q3_2)
         distress_score = distress.score_checker()
 
         if distress_score == "[NORMAL]":
             sysprompt_writer("BASE_PROMPT_1.md") 
+            print("Normal behaviour...")
             config_writer(data, False)
         elif distress_score == "[ATTENTIVE]":
             sysprompt_writer("BASE_PROMPT_2.md")
+            print("Attentive behaviour...")
             config_writer(data, False)
         elif distress_score == "[ELEVATED]":
             sysprompt_writer("BASE_PROMPT_3.md")
+            print("Elevated behaviour...")
             config_writer(data, False)
-        elif distress_score == "[HIGH_SUPPORT]":
+        elif distress_score == "[HIGH SUPPORT]":
             sysprompt_writer("BASE_PROMPT_4.md")
+            print("High support behaviour...")
             config_writer(data, False)
 
 def ollama_warmup():

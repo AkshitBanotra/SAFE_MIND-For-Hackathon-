@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from llm.ollama_api import companion_response, streaming_response, messages, behaviour_adaptor
+from core.distress_engine import DistressEngine
 from core.PromptManager import PromptManager
 from voice.tts import pipeline, tts_worker
 from voice.stt import callback, stt_worker, stt_start
@@ -40,6 +41,8 @@ conv.initialize()
 prompt = PromptManager()
 
 new_message = threading.Event()
+
+distress = DistressEngine()
 
 ############################################
 
@@ -110,7 +113,7 @@ def assessment_worker():
         if conv.queue_tracked >= last_accessed + 5:
             trigger = """
             Assess the supplied batch of user messages using the defined indicators
-            and scoring rules. Return only the JSON object specified in the schema.
+            and scoring rules. Return in the specified format.
             """
 
             runtime_message = [
@@ -129,7 +132,11 @@ def assessment_worker():
             response = requests.post(shared.url, json=payload)
             print(response)
             assessment = response.json()["message"]["content"]
-            shared.q3.put(parse_assessment(assessment))
+            assessment_values = parse_assessment(assessment)
+            shared.q3_1.put(assessment_values)
+            shared.q3_2.put(assessment_values)
+            distress.runtime_distress_score(shared.q3_1)
+            distress.distress_db("insert")
             data["llm_analysed"] = True
             with open(json_path, "w") as f:
                 json.dump(data, f, indent=4)
@@ -150,6 +157,8 @@ def assessment_generator():
     daemon=True
     )
 
+    distress.distress_db("init")
+
     assessment_thread.start()
  
     while True:
@@ -162,7 +171,6 @@ def assessment_generator():
         )
 
         behaviour_adaptor_thread.start()
-
         conv.add()
 
 ###########################################
@@ -214,7 +222,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3000/therapist"],
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
@@ -388,3 +396,41 @@ async def voice_chat(websocket: WebSocket):
 
     finally:
         audio_task.cancel()
+
+####################################################
+
+# Therapist side interface...
+
+@app.get("/therapist/distress/today")
+def distress_index():
+
+    now = datetime.now()
+    current_date = now.strftime("%d %B %Y")
+
+    distress_scores = distress.distress_db("fetch_1")
+
+    #distress.distress_db("rem_distress")
+
+    total = 0
+    count = 0
+    for row in distress_scores:
+
+        if row[0] is not None:
+            total = total + row[0]
+            count += 1
+
+    if count > 0:
+        distress_index = total / count
+        distress_index = round(distress_index)
+    else:
+        distress_index = None
+
+    print("Distress Index: ", distress_index)
+
+    if distress_index is None:
+        raise HTTPException(status_code=404, detail="No distress score for today.")
+
+    return {
+            "date": current_date,
+            "distress_score": distress_index
+    }
