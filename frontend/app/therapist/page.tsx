@@ -91,7 +91,10 @@ export default function TherapistDashboard() {
       }
 
       const summaryRequestDate = formatDateLocal(new Date())
-      if (summaryFetchedDateRef.current !== summaryRequestDate) {
+      // Demo mode polls the distress endpoint every five minutes, so poll the
+      // summary endpoint on those same refreshes instead of reusing the
+      // once-per-day guard from the live dashboard.
+      if (demo || summaryFetchedDateRef.current !== summaryRequestDate) {
         summaryFetchedDateRef.current = summaryRequestDate
         try {
           const summaryResponse = await fetch(`${root}/therapist/summary`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
